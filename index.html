@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Zgłoś parkowanie</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+  <style>
+    :root {
+      --bg: #f0f2f5;
+      --card: #ffffff;
+      --primary: #e53e3e;
+      --primary-hover: #c53030;
+      --text: #1a202c;
+      --muted: #718096;
+      --border: #e2e8f0;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--tg-theme-bg-color, var(--bg));
+      color: var(--tg-theme-text-color, var(--text));
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+
+    .card {
+      background: var(--tg-theme-secondary-bg-color, var(--card));
+      border-radius: var(--radius);
+      padding: 24px;
+      width: 100%;
+      max-width: 420px;
+      box-shadow: 0 2px 16px rgba(0,0,0,.08);
+    }
+
+    h1 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .subtitle {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-bottom: 20px;
+    }
+
+    .field {
+      margin-bottom: 12px;
+    }
+
+    .field label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      margin-bottom: 4px;
+    }
+
+    .field .value {
+      font-size: 0.95rem;
+      font-weight: 500;
+      word-break: break-word;
+    }
+
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 16px 0;
+    }
+
+    .turnstile-wrap {
+      display: flex;
+      justify-content: center;
+      margin: 20px 0 16px;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 14px;
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background .15s;
+    }
+
+    .btn:hover { background: var(--primary-hover); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+    .status {
+      margin-top: 14px;
+      font-size: 0.88rem;
+      text-align: center;
+      min-height: 1.2em;
+    }
+
+    .status.error { color: #e53e3e; }
+    .status.success { color: #38a169; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>Zgłoś nieprawidłowe parkowanie</h1>
+  <p class="subtitle">Sprawdź dane i potwierdź weryfikację.</p>
+
+  <div class="divider"></div>
+
+  <div class="field">
+    <label>Miejscowość</label>
+    <div class="value" id="f-locality">—</div>
+  </div>
+  <div class="field" id="wrap-district" style="display:none">
+    <label>Dzielnica</label>
+    <div class="value" id="f-district">—</div>
+  </div>
+  <div class="field">
+    <label>Ulica / numer</label>
+    <div class="value" id="f-street">—</div>
+  </div>
+  <div class="field">
+    <label>Wykroczenie</label>
+    <div class="value" id="f-category">—</div>
+  </div>
+  <div class="field" id="wrap-desc" style="display:none">
+    <label>Opis</label>
+    <div class="value" id="f-desc">—</div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Cloudflare Turnstile -->
+  <div class="turnstile-wrap">
+    <div id="cf-turnstile"
+         class="cf-turnstile"
+         <!-- data-sitekey="0x4AAAAAABnkABKr2vYA6GF2" -->
+         data-sitekey="1x00000000000000000000AA"
+         data-callback="onTurnstileSuccess"
+         data-error-callback="onTurnstileError"
+         data-theme="auto">
+    </div>
+  </div>
+
+  <button class="btn" id="submit-btn" disabled>Wyślij zgłoszenie do policji</button>
+  <p class="status" id="status-msg"></p>
+</div>
+
+<script>
+  const tg = window.Telegram?.WebApp;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  // ── Parse query params ─────────────────────────────────────────────────────
+  const p = new URLSearchParams(window.location.search);
+  const get = (k) => p.get(k) || "";
+
+  const locality     = get("locality");
+  const gmina        = get("gmina");
+  const powiat       = get("powiat");
+  const wojewodztwo  = get("wojewodztwo");
+  const district     = get("district");
+  const street       = get("street");
+  const buildingNumber = get("buildingNumber");
+  const category     = get("category");
+  const description  = get("description");
+
+  if (!locality) {
+    document.getElementById("status-msg").textContent = "Błąd konfiguracji: brak danych zgłoszenia.";
+    document.getElementById("status-msg").className = "status error";
+  }
+
+  // ── Fill summary UI ────────────────────────────────────────────────────────
+  // `category` is now the full value string sent to zglosparkowanie.pl/send-email.
+  // "Niestosowanie się do znaku" is the value but show the parenthetical label.
+  const CATEGORY_DISPLAY = {
+    "Niestosowanie się do znaku": "Niestosowanie się do znaku (podaj szczegóły w opisie)",
+    "Nieprawidłowe parkowanie (inne)": "Inne nieprawidłowe parkowanie"
+  };
+
+  document.getElementById("f-locality").textContent = locality || "—";
+  document.getElementById("f-street").textContent =
+    [street, buildingNumber].filter(Boolean).join(" ") || "—";
+  document.getElementById("f-category").textContent =
+    CATEGORY_DISPLAY[category] || category || "—";
+
+  if (district) {
+    document.getElementById("f-district").textContent = district;
+    document.getElementById("wrap-district").style.display = "";
+  }
+  if (description) {
+    document.getElementById("f-desc").textContent = description;
+    document.getElementById("wrap-desc").style.display = "";
+  }
+
+  // ── Turnstile callbacks ────────────────────────────────────────────────────
+  let turnstileToken = null;
+
+  window.onTurnstileSuccess = function(token) {
+    turnstileToken = token;
+    document.getElementById("submit-btn").disabled = false;
+    setStatus("", "");
+  };
+
+  window.onTurnstileError = function() {
+    turnstileToken = null;
+    document.getElementById("submit-btn").disabled = true;
+    setStatus("Weryfikacja nie powiodła się. Odśwież stronę.", "error");
+  };
+
+  // ── Submit ─────────────────────────────────────────────────────────────────
+  document.getElementById("submit-btn").addEventListener("click", async () => {
+    if (!turnstileToken) return;
+
+    const btn = document.getElementById("submit-btn");
+    btn.disabled = true;
+    btn.textContent = "Wysyłanie...";
+    setStatus("", "");
+
+    const payload = {
+      locality,
+      gmina,
+      powiat,
+      wojewodztwo,
+      district,
+      street,
+      buildingNumber,
+      category,
+      description,
+      truthConsent: "on",
+      rodoConsent: "on",
+      "cf-turnstile-response": turnstileToken
+    };
+
+    // Remove empty strings
+    Object.keys(payload).forEach(k => { if (payload[k] === "") delete payload[k]; });
+
+    try {
+      const res = await fetch("https://zglosparkowanie.pl/send-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      const json = await res.json().catch(() => ({}));
+
+      if (res.ok) {
+        setStatus("Zgłoszenie wysłane!", "success");
+        btn.textContent = "Wysłano!";
+
+        // Notify the bot and close WebApp after a short delay
+        if (tg) {
+          tg.sendData(JSON.stringify({ success: true, report_id: json.report_id || null }));
+        }
+        setTimeout(() => tg?.close(), 1500);
+      } else {
+        const msg = json.message || `Błąd serwera (${res.status})`;
+        setStatus(msg, "error");
+        btn.disabled = false;
+        btn.textContent = "Wyślij zgłoszenie do policji";
+        // Reset Turnstile so user can retry
+        if (window.turnstile) window.turnstile.reset();
+        turnstileToken = null;
+      }
+    } catch (err) {
+      setStatus("Błąd sieci. Sprawdź połączenie i spróbuj ponownie.", "error");
+      btn.disabled = false;
+      btn.textContent = "Wyślij zgłoszenie do policji";
+      if (window.turnstile) window.turnstile.reset();
+      turnstileToken = null;
+    }
+  });
+
+  function setStatus(msg, type) {
+    const el = document.getElementById("status-msg");
+    el.textContent = msg;
+    el.className = "status" + (type ? " " + type : "");
+  }
+</script>
+</body>
+</html>
